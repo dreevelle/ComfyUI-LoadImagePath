@@ -1,0 +1,17 @@
+[project]
+name = "comfyui-load-image-path"
+description = "Load images from a pasted filesystem path in ComfyUI. The loader is a structural clone of the built-in Load Image node, so the mask editor, clipspace and inpainting all keep working; a companion node loads whole folders in place."
+version = "1.0.0"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.10"
+# av / numpy / torch / Pillow are provided by ComfyUI core, so no extra dependencies.
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/dreevelle/ComfyUI-LoadImagePath"
+
+[tool.comfy]
+PublisherId = "dreevelle"
+DisplayName = "ComfyUI-LoadImagePath"
+Icon = ""
