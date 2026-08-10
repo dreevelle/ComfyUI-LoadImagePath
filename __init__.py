@@ -45,7 +45,7 @@ from comfy.cli_args import args
 from comfy.utils import ProgressBar
 from comfy_api.latest import ComfyExtension, IO, InputImpl, UI
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # Serves web/loadimagepath.js, which adds the paste-a-path box to the loader.
 WEB_DIRECTORY = "./web"
