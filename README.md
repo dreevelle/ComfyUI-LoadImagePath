@@ -39,7 +39,7 @@ contents, so pasting the same path twice reuses the one copy instead of filling
 
 | Input | Default | Notes |
 |---|---|---|
-| `path` | — | Path to a folder of images, or to a single animated file. Folders load every image inside, sorted by filename, as one batch. Subfolders are not searched. Surrounding quotes, a `file://` prefix and a leading `~` are accepted. |
+| `path` | — | Path to a folder of images, or to a single animated file. Folders load every image inside, sorted by filename, as one batch. Subfolders are not searched. Surrounding quotes, a `file://` prefix and a leading `~` are accepted. Confined to ComfyUI's own folders unless you allow more — see [Security](#security). |
 | `start_index` *(advanced)* | `0` | Skip this many images — or frames, for a single animated file. |
 | `count` *(advanced)* | `0` | How many to load. `0` means all. |
 | `select_every_nth` *(advanced)* | `1` | Load only every Nth. |
@@ -69,8 +69,39 @@ Output is identical regardless of thread count.
 
 ## Security
 
-The import route copies a file the browser names, off the server's filesystem.
-That is a real capability, and it is fenced in accordingly:
+### Where the sequence node may read (`COMFYUI_LOADIMAGEPATH_ROOTS`)
+
+**`Load Image Sequence From Path` reads only inside ComfyUI's own `input/`,
+`output/`, `temp/` and `user/` folders** unless you say otherwise. To load frames
+from anywhere else, list those folders in `COMFYUI_LOADIMAGEPATH_ROOTS` when you
+start ComfyUI, separated the way `PATH` is (`:` on Linux and macOS, `;` on
+Windows):
+
+```bash
+COMFYUI_LOADIMAGEPATH_ROOTS=~/frames:/mnt/renders python main.py
+```
+
+A path outside the allowed folders is refused at validation time with a message
+naming the variable, so you find out on the queue press rather than mid-run.
+Both `..` and symlinks are resolved before the check, so neither escapes.
+
+The reason for the fence: the node's `path` is free text arriving over `/prompt`,
+and its `IMAGE` output hands the decoded pixels straight back. Without
+containment, anything that can reach that route can name any image on the
+server's disk and read it out — which is fine on a laptop you alone use, and not
+fine on anything shared or exposed. Confining reads to folders *you* nominated
+makes it a capability you configured rather than one that is simply open. The
+allowlist deliberately cannot be set from the graph, only from the environment
+the server was started in.
+
+`Load Image From Path` is unaffected: its file is always in `input/` by the time
+it loads.
+
+### The import route
+
+The import route behind the loader's paste box copies a file the browser names,
+off the server's filesystem. That is a real capability, and it is fenced in
+accordingly:
 
 - **Refused when ComfyUI is not on localhost.** If `--listen` is bound to
   anything other than a loopback address the route returns 403. Set

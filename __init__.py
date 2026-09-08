@@ -17,7 +17,10 @@ those for free rather than reimplementing them badly.
 
 ``Load Image Sequence From Path`` handles the case the first node deliberately
 does not: a whole folder, loaded in place with no copying, with frame selection.
-It is entirely server-side with no frontend code.
+It is entirely server-side with no frontend code. Because its path is free text
+arriving over ``/prompt``, it reads only inside ComfyUI's own directories plus
+whatever the operator allows through ``COMFYUI_LOADIMAGEPATH_ROOTS`` — see
+``_containment_error``.
 
 Both decode through ``VideoFromFile``, the same primitive ``Load Image`` uses, so
 pixels and masks match it bit for bit — full-precision 16-bit PNG, paletted
@@ -45,7 +48,7 @@ from comfy.cli_args import args
 from comfy.utils import ProgressBar
 from comfy_api.latest import ComfyExtension, IO, InputImpl, UI
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # Serves web/loadimagepath.js, which adds the paste-a-path box to the loader.
 WEB_DIRECTORY = "./web"
@@ -56,6 +59,10 @@ BIGMAX = 2**53 - 1
 
 # Opt-in for running the import route on a non-loopback bind. See _import_denied.
 ALLOW_REMOTE_ENV = "COMFYUI_LOADIMAGEPATH_ALLOW_REMOTE"
+
+# Extra directories the sequence node may read from, on top of ComfyUI's own.
+# os.pathsep-separated, like PATH. See _allowed_roots.
+ALLOWED_ROOTS_ENV = "COMFYUI_LOADIMAGEPATH_ROOTS"
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +98,56 @@ def _resolve_path(path: str | None) -> str | None:
     # expanduser but deliberately not expandvars: on Windows the latter eats
     # %...% tokens, and ComfyUI users habitually paste those as literal text.
     return os.path.abspath(os.path.expanduser(text))
+
+
+def _allowed_roots() -> list[str]:
+    """Directories the sequence node is permitted to read from.
+
+    ComfyUI's own directories always, plus whatever the operator listed in
+    COMFYUI_LOADIMAGEPATH_ROOTS. Recomputed per call rather than cached: the
+    input and user directories are settable at runtime, and an operator who
+    edits the environment should not have to guess whether it took effect.
+    """
+    roots = [
+        folder_paths.get_input_directory(),
+        folder_paths.get_output_directory(),
+        folder_paths.get_temp_directory(),
+        folder_paths.get_user_directory(),
+    ]
+    extra = os.environ.get(ALLOWED_ROOTS_ENV) or ""
+    roots += extra.split(os.pathsep)
+    return [
+        os.path.abspath(os.path.expanduser(root.strip()))
+        for root in roots
+        if root and root.strip()
+    ]
+
+
+def _containment_error(resolved: str) -> str | None:
+    """Reason `resolved` is out of bounds, or None if it may be read.
+
+    An unbounded filesystem path on a node input is an arbitrary-read primitive:
+    anything that can reach /prompt can name a file and read the decoded pixels
+    back out of the IMAGE output. Containing reads to directories the *operator*
+    chose is what makes that a configured capability rather than an exposed one,
+    which is why the allowlist is settable only from the environment ComfyUI was
+    started in and never from the graph.
+
+    Containment is checked before any stat of the path, so an out-of-bounds path
+    cannot be used as an existence oracle either.
+    """
+    roots = _allowed_roots()
+    for root in roots:
+        # realpath on both sides, so neither '..' nor a planted symlink escapes.
+        if folder_paths.is_within_directory(root, resolved) or resolved == root:
+            return None
+    return (
+        f"path is outside the folders this node may read: {resolved}\n"
+        f"Allowed: {', '.join(roots)}\n"
+        f"To read from anywhere else, start ComfyUI with {ALLOWED_ROOTS_ENV} set to "
+        f"the folders you want to allow, separated by '{os.pathsep}' — for example "
+        f"{ALLOWED_ROOTS_ENV}={os.path.join(os.path.expanduser('~'), 'frames')}"
+    )
 
 
 def _scan_directory(directory: str) -> list[str]:
@@ -480,7 +537,9 @@ class LoadImageSequenceFromPath(IO.ComfyNode):
             description=(
                 "Loads every image in a folder as one batch, sorted by filename, "
                 "from a typed or pasted path. Nothing is copied. Images must all "
-                "be the same size; mismatches raise rather than being resized."
+                "be the same size; mismatches raise rather than being resized. "
+                "Reads outside ComfyUI's own folders need "
+                f"{ALLOWED_ROOTS_ENV} set on the server."
             ),
             category="image",
             inputs=[
@@ -494,7 +553,9 @@ class LoadImageSequenceFromPath(IO.ComfyNode):
                         "  A folder loads every image inside it, sorted by filename, "
                         "as one batch. Subfolders are not searched.\n"
                         "  A file loads all of its frames.\n"
-                        "Surrounding quotes, a file:// prefix and a leading ~ are accepted."
+                        "Surrounding quotes, a file:// prefix and a leading ~ are accepted.\n"
+                        "Reads are confined to ComfyUI's own folders unless the server "
+                        f"was started with {ALLOWED_ROOTS_ENV} listing the others."
                     ),
                 ),
                 IO.Int.Input(
@@ -533,6 +594,10 @@ class LoadImageSequenceFromPath(IO.ComfyNode):
     def execute(cls, path: str, start_index: int = 0, count: int = 0,
                 select_every_nth: int = 1, threads: int = 0) -> IO.NodeOutput:
         resolved = _resolve_path(path)
+        if resolved is not None:
+            denied = _containment_error(resolved)
+            if denied is not None:
+                raise PermissionError(denied)
         if resolved is None or not os.path.exists(resolved):
             raise FileNotFoundError(f"path does not exist: {resolved}")
 
@@ -592,7 +657,13 @@ class LoadImageSequenceFromPath(IO.ComfyNode):
             resolved = _resolve_path(path)
         except ValueError:
             return "invalid"
-        if resolved is None or not os.path.exists(resolved):
+        if resolved is None:
+            return "missing"
+        if _containment_error(resolved) is not None:
+            # A constant, so an out-of-bounds path cannot be probed for existence
+            # by watching the cache key change.
+            return "denied"
+        if not os.path.exists(resolved):
             return "missing"
 
         if os.path.isfile(resolved):
@@ -618,6 +689,9 @@ class LoadImageSequenceFromPath(IO.ComfyNode):
             resolved = _resolve_path(path)
         except ValueError as e:
             return str(e)
+        denied = _containment_error(resolved)
+        if denied is not None:
+            return denied
         if not os.path.exists(resolved):
             return f"path does not exist: {resolved}"
         if os.path.isdir(resolved):

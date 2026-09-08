@@ -99,7 +99,8 @@ Four layers in `__init__.py`, in order:
    whitespace, unwraps `file://`, expands `~`. Deliberately does *not* call
    `expandvars`, which would eat `%...%` tokens on Windows. Returns `None` for
    `None`, because a linked (non-widget) input arrives as `None` at validation
-   time rather than being omitted.
+   time rather than being omitted. `_allowed_roots` / `_containment_error` sit
+   beside it — see "Path containment" below.
 2. **`_load_animated_webp`** — copied from `nodes.py` `LoadImage.load_image`
    (v0.31.0, lines 1757-1789). PyAV cannot decode animated WebP and core keeps a
    Pillow path for exactly that case. Copied rather than imported so a core
@@ -194,6 +195,48 @@ constraints fence it in, all covered by `import_tests.py`:
   existing copy. Copies land on `.partial` and are `os.replace`d, so an
   interrupted import cannot leave a truncated file under a complete-looking hash.
 
+### Path containment on the sequence node
+
+`LoadImageSequenceFromPath` reads only inside `_allowed_roots()`: ComfyUI's
+`input/`, `output/`, `temp/` and `user/` directories, plus anything the operator
+listed in `COMFYUI_LOADIMAGEPATH_ROOTS` (`os.pathsep`-separated, like `PATH`).
+Everything else is refused by `_containment_error`.
+
+**This is not optional polish — it is why the pack is installable.** Version
+1.0.1 was banned from the Comfy Registry on review, verbatim:
+
+> `policy-v0.2: ARBITRARY_FILE_READ` — The STRING widget `path` flows through
+> `_resolve_path` (`os.path.abspath(os.path.expanduser(...))`, no containment, no
+> `'..'` rejection) into `os.scandir`/`_load_one` media decoders, and the decoded
+> pixels are returned as the IMAGE output and rendered via `UI.PreviewImage`. An
+> attacker driving the unauthenticated, CSRF-reachable `/prompt` route can read
+> and exfiltrate any image/animated file on the server's filesystem.
+
+Check the live status with
+`curl -s 'https://api.comfy.org/nodes/comfyui-load-image-path/versions?include_status_reason=true'`
+— `status_reason` is omitted unless you pass that query parameter, and it carries
+both the admin verdict and the automated scan history under `statusHistory`.
+(The YARA scanner also flags `os.environ.get` as "environment variable
+manipulation" at severity *info*; that flag is noise and both 1.0.0 and 1.0.1
+carry it.)
+
+Three properties are load-bearing, all covered by the gate tests:
+
+- **The allowlist is environment-only, never a graph input.** A root settable
+  from the prompt is not a containment boundary, it is a second path widget.
+- **Containment is checked before any `stat`.** Otherwise "does this path exist"
+  leaks through the error message, and `fingerprint_inputs` returns the constant
+  `"denied"` for the same reason — a per-path digest would leak it through the
+  cache key instead.
+- **`folder_paths.is_within_directory` does the comparison**, because it
+  `realpath`s both sides, so a `..` segment and a symlink planted inside `input/`
+  both fail closed.
+
+Do not relax this to "warn and continue", and do not add `$HOME` or
+`folder_paths.base_path` to the defaults — a default that already covers the
+interesting files is not containment, and it is the exact finding that got the
+version banned.
+
 ### Why the sequence node cannot just call `nodes.LoadImage`
 
 `folder_paths.get_annotated_filepath` runs an `is_within_directory` containment
@@ -238,6 +281,12 @@ whole reason for existing.
 
 Published on the Comfy Registry as `comfyui-load-image-path` under publisher
 `dreevelle`, which is what makes it installable from ComfyUI-Manager.
+
+**A banned version stays banned.** 1.0.1 is `NodeVersionStatusBanned` and cannot
+be republished over (`400 The node version already exists`); only a registry
+admin can lift it. 1.0.2 is the containment fix — see "Path containment on the
+sequence node". 1.0.0 carries the same unbounded read and was approved before
+policy-v0.2, so treat its Active status as an oversight rather than a precedent.
 
 **Changing `[project].version` in `pyproject.toml` on `main` publishes a
 release.** `.github/workflows/publish_action.yml` watches that file's path and

@@ -1,3 +1,4 @@
 # Files kept in git but not shipped in the registry package.
 CLAUDE.md
 .github/
+*_tests.py
