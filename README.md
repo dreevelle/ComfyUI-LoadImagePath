@@ -19,13 +19,19 @@ node is structurally identical to the one those features were written for.
 **Load Image Sequence From Path** covers what the first node deliberately
 doesn't: a whole folder, loaded in place with no copying, with frame selection.
 
+> **Read this before your first paste.** Out of the box both nodes only touch
+> ComfyUI's own `input/`, `output/`, `temp/` and `user/` folders. To use paths
+> from anywhere else — which is presumably why you installed this — name those
+> folders in `COMFYUI_LOADIMAGEPATH_ROOTS` when you start ComfyUI. One-time
+> setup, details in [Security](#security).
+
 ## Nodes
 
 ### Load Image From Path (category: `image`)
 
 | Input | Default | Notes |
 |---|---|---|
-| `paste path` | — | Paste a path and press Enter. The file is imported into `input/` and selected below. Not a graph input — it does its job and clears itself. |
+| `paste path` | — | Paste a path and press Enter. The file is imported into `input/` and selected below. Not a graph input — it does its job and clears itself. Paths outside ComfyUI's own folders need `COMFYUI_LOADIMAGEPATH_ROOTS` — see [Security](#security). |
 | `image` | — | The built-in image combo, with its upload button. Identical to `Load Image`. |
 
 Outputs `IMAGE` and `MASK`. Right-click → **Open in MaskEditor** works, because
@@ -39,7 +45,7 @@ contents, so pasting the same path twice reuses the one copy instead of filling
 
 | Input | Default | Notes |
 |---|---|---|
-| `path` | — | Path to a folder of images, or to a single animated file. Folders load every image inside, sorted by filename, as one batch. Subfolders are not searched. Surrounding quotes, a `file://` prefix and a leading `~` are accepted. Confined to ComfyUI's own folders unless you allow more — see [Security](#security). |
+| `path` | — | Path to a folder of images, or to a single animated file. Folders load every image inside, sorted by filename, as one batch. Subfolders are not searched. Surrounding quotes, a `file://` prefix and a leading `~` are accepted. Confined to ComfyUI's own folders unless you allow more with `COMFYUI_LOADIMAGEPATH_ROOTS` — see [Security](#security). |
 | `start_index` *(advanced)* | `0` | Skip this many images — or frames, for a single animated file. |
 | `count` *(advanced)* | `0` | How many to load. `0` means all. |
 | `select_every_nth` *(advanced)* | `1` | Load only every Nth. |
@@ -69,40 +75,44 @@ Output is identical regardless of thread count.
 
 ## Security
 
-### Where the sequence node may read (`COMFYUI_LOADIMAGEPATH_ROOTS`)
+### Which folders these nodes may read (`COMFYUI_LOADIMAGEPATH_ROOTS`)
 
-**`Load Image Sequence From Path` reads only inside ComfyUI's own `input/`,
-`output/`, `temp/` and `user/` folders** unless you say otherwise. To load frames
-from anywhere else, list those folders in `COMFYUI_LOADIMAGEPATH_ROOTS` when you
-start ComfyUI, separated the way `PATH` is (`:` on Linux and macOS, `;` on
-Windows):
+**Both nodes read only inside ComfyUI's own `input/`, `output/`, `temp/` and
+`user/` folders** unless you say otherwise. To use paths anywhere else — pasting
+`~/Pictures/shot.png` into the loader, or pointing the sequence node at a render
+folder — list those folders in `COMFYUI_LOADIMAGEPATH_ROOTS` when you start
+ComfyUI, separated the way `PATH` is (`:` on Linux and macOS, `;` on Windows):
 
 ```bash
-COMFYUI_LOADIMAGEPATH_ROOTS=~/frames:/mnt/renders python main.py
+COMFYUI_LOADIMAGEPATH_ROOTS=~/Pictures:~/frames:/mnt/renders python main.py
 ```
 
-A path outside the allowed folders is refused at validation time with a message
-naming the variable, so you find out on the queue press rather than mid-run.
-Both `..` and symlinks are resolved before the check, so neither escapes.
+Set it once in whatever starts ComfyUI and forget about it. Until you do, a path
+outside those folders is refused: the sequence node fails validation on the queue
+press with a message naming the variable, and the loader's paste box reports it
+in the widget label, with the full list of allowed folders in the server console.
+`..` and symlinks are resolved before the check, so neither escapes.
 
-The reason for the fence: the node's `path` is free text arriving over `/prompt`,
-and its `IMAGE` output hands the decoded pixels straight back. Without
-containment, anything that can reach that route can name any image on the
-server's disk and read it out — which is fine on a laptop you alone use, and not
-fine on anything shared or exposed. Confining reads to folders *you* nominated
-makes it a capability you configured rather than one that is simply open. The
-allowlist deliberately cannot be set from the graph, only from the environment
-the server was started in.
-
-`Load Image From Path` is unaffected: its file is always in `input/` by the time
-it loads.
+The reason for the fence: both surfaces take a filesystem path from an untrusted
+caller. The sequence node's `path` is free text arriving over `/prompt`, and its
+`IMAGE` output hands the decoded pixels straight back; the import route copies a
+file the browser names into `input/`, where `/view` can fetch it. Without
+containment, anything that can reach ComfyUI can name any image on the server's
+disk and read it out. Loopback is not a boundary on its own here — a page in your
+own browser is on loopback too. Confining reads to folders *you* nominated makes
+it a capability you configured rather than one that is simply open, which is why
+the allowlist can only be set in the environment ComfyUI was started in, never
+from the graph and never from the request.
 
 ### The import route
 
 The import route behind the loader's paste box copies a file the browser names,
-off the server's filesystem. That is a real capability, and it is fenced in
-accordingly:
+off the server's filesystem. That is a wider capability than reading one, and it
+is fenced in accordingly:
 
+- **The source must be inside the allowed folders**, as above. Everything else
+  gets a 403 before the file is so much as stat'd, so the route cannot be used to
+  test what exists either.
 - **Refused when ComfyUI is not on localhost.** If `--listen` is bound to
   anything other than a loopback address the route returns 403. Set
   `COMFYUI_LOADIMAGEPATH_ALLOW_REMOTE=1` to override, and only do that if you

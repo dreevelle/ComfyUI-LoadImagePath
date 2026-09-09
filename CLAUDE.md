@@ -178,9 +178,11 @@ standalone import, including the test harnesses and `comfy node validate`.
 
 ### Import route security
 
-Copying a caller-named file is a wider primitive than reading one. Four
-constraints fence it in, all covered by `import_tests.py`:
+Copying a caller-named file is a wider primitive than reading one. Five
+constraints fence it in; `gate_tests.py` covers the first:
 
+- **`_containment_error`** refuses with 403 for any source outside
+  `_allowed_roots()`, before the path is stat'd. See "Path containment".
 - **`_import_denied`** refuses with 403 when `args.listen` is not a loopback
   address, unless `COMFYUI_LOADIMAGEPATH_ALLOW_REMOTE=1`. A file-copy endpoint
   reachable from the network is a different proposition to a local one.
@@ -195,15 +197,27 @@ constraints fence it in, all covered by `import_tests.py`:
   existing copy. Copies land on `.partial` and are `os.replace`d, so an
   interrupted import cannot leave a truncated file under a complete-looking hash.
 
-### Path containment on the sequence node
+### Path containment
 
-`LoadImageSequenceFromPath` reads only inside `_allowed_roots()`: ComfyUI's
-`input/`, `output/`, `temp/` and `user/` directories, plus anything the operator
-listed in `COMFYUI_LOADIMAGEPATH_ROOTS` (`os.pathsep`-separated, like `PATH`).
-Everything else is refused by `_containment_error`.
+**Both** read surfaces go through `_containment_error`, against the same
+`_allowed_roots()`: ComfyUI's `input/`, `output/`, `temp/` and `user/`
+directories, plus anything the operator listed in `COMFYUI_LOADIMAGEPATH_ROOTS`
+(`os.pathsep`-separated, like `PATH`).
 
-**This is not optional polish — it is why the pack is installable.** Version
-1.0.1 was banned from the Comfy Registry on review, verbatim:
+- `LoadImageSequenceFromPath` — checked in `execute` (`PermissionError`),
+  `validate_inputs` (the full multi-line message) and `fingerprint_inputs`.
+- `import_handler` — checked before the `os.path.exists` call, 403. The response
+  body carries **one line**, because `web/loadimagepath.js` renders `data.error`
+  into a widget label; the full reason, allowed roots included, goes to the
+  server log instead.
+
+One env var governs both on purpose. They are the same primitive — name a file,
+get its pixels back — and two knobs would mean one of them ends up misconfigured.
+
+**This is not optional polish — it is why the pack is installable.** It is also
+the reason the loader refuses most paths on a fresh install until the operator
+sets the variable; that first-run cost is deliberate and the README leads with
+it. Version 1.0.1 was banned from the Comfy Registry on review, verbatim:
 
 > `policy-v0.2: ARBITRARY_FILE_READ` — The STRING widget `path` flows through
 > `_resolve_path` (`os.path.abspath(os.path.expanduser(...))`, no containment, no
@@ -220,7 +234,14 @@ both the admin verdict and the automated scan history under `statusHistory`.
 manipulation" at severity *info*; that flag is noise and both 1.0.0 and 1.0.1
 carry it.)
 
-Three properties are load-bearing, all covered by the gate tests:
+The verdict named only the sequence node, but the import route is the same
+primitive reached a different way — it copies a caller-named file into `input/`,
+where `/view` serves it — so it is gated too rather than waiting to be found in
+the next review. `_import_denied`'s loopback check is not a substitute: a page in
+the operator's own browser is on loopback, which is precisely how CSRF to
+127.0.0.1 works.
+
+Four properties are load-bearing, all covered by `gate_tests.py`:
 
 - **The allowlist is environment-only, never a graph input.** A root settable
   from the prompt is not a containment boundary, it is a second path widget.
@@ -231,11 +252,13 @@ Three properties are load-bearing, all covered by the gate tests:
 - **`folder_paths.is_within_directory` does the comparison**, because it
   `realpath`s both sides, so a `..` segment and a symlink planted inside `input/`
   both fail closed.
+- **The route answers 403 for a denied path whether or not it exists**, with a
+  byte-identical body, for the same no-oracle reason.
 
-Do not relax this to "warn and continue", and do not add `$HOME` or
-`folder_paths.base_path` to the defaults — a default that already covers the
-interesting files is not containment, and it is the exact finding that got the
-version banned.
+Do not relax this to "warn and continue", do not exempt the import route because
+it "already checks loopback", and do not add `$HOME` or `folder_paths.base_path`
+to the defaults — a default that already covers the interesting files is not
+containment, and it is the exact finding that got the version banned.
 
 ### Why the sequence node cannot just call `nodes.LoadImage`
 
@@ -284,9 +307,9 @@ Published on the Comfy Registry as `comfyui-load-image-path` under publisher
 
 **A banned version stays banned.** 1.0.1 is `NodeVersionStatusBanned` and cannot
 be republished over (`400 The node version already exists`); only a registry
-admin can lift it. 1.0.2 is the containment fix — see "Path containment on the
-sequence node". 1.0.0 carries the same unbounded read and was approved before
-policy-v0.2, so treat its Active status as an oversight rather than a precedent.
+admin can lift it. 1.0.2 is the containment fix — see "Path containment". 1.0.0
+carries the same unbounded read and was approved before policy-v0.2, so treat its
+Active status as an oversight rather than a precedent.
 
 **Changing `[project].version` in `pyproject.toml` on `main` publishes a
 release.** `.github/workflows/publish_action.yml` watches that file's path and

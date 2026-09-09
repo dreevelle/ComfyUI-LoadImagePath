@@ -12,7 +12,9 @@ indistinguishable from the [B, 64, 64] "no mask" sentinel and the equivalence
 checks at the end would prove nothing.
 """
 
+import asyncio
 import importlib.util
+import json
 import os
 import shutil
 import sys
@@ -125,6 +127,60 @@ check("linked (None) path still validates", N.validate_inputs(None) is True)
 check("linked path fingerprints NaN", N.fingerprint_inputs(None) != N.fingerprint_inputs(None) or True)
 check("empty path still the empty-path error",
       "path is empty" in N.validate_inputs("   "))
+
+print("== import route is contained too ==")
+
+
+class FakeRequest:
+    """Just enough of a web.Request for import_handler."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+
+def post(path_value):
+    response = asyncio.run(m.import_handler(FakeRequest({"path": path_value})))
+    return response.status, json.loads(response.body)
+
+
+check("route reachable at all (loopback bind)", m._import_denied() is None,
+      repr(m._import_denied())[:80])
+
+inside_file = os.path.join(inside, "f000.png")
+outside_file = os.path.join(outside, "f000.png")
+
+status, body = post(inside_file)
+check("import inside input/ succeeds", status == 200, (status, body))
+imported = body.get("filename")
+if imported:
+    os.remove(os.path.join(inp, imported))
+
+status, body = post(outside_file)
+check("import outside is 403", status == 403, (status, body))
+check("403 names the env var", m.ALLOWED_ROOTS_ENV in body.get("error", ""), body)
+check("403 message is one line", "\n" not in body.get("error", ""), body)
+check("nothing was copied",
+      not any(f.startswith("f000_") for f in os.listdir(inp)))
+
+status, ghost_body = post(os.path.join(outside, "no_such_file.png"))
+check("missing file outside is still 403, not 404", status == 403, status)
+check("no existence oracle: identical body", ghost_body == body, (ghost_body, body))
+
+status, body = post(os.path.join(inp, "..", "..", "etc", "hostname"))
+check("'..' escape is 403", status == 403, (status, body))
+
+os.environ[m.ALLOWED_ROOTS_ENV] = outside
+status, body = post(outside_file)
+check("env var opens the route too", status == 200, (status, body))
+if body.get("filename"):
+    os.remove(os.path.join(inp, body["filename"]))
+del os.environ[m.ALLOWED_ROOTS_ENV]
+
+status, body = post(outside_file)
+check("and closes again", status == 403, (status, body))
 
 print("== LoadImageFromPath equivalence to core is untouched ==")
 name = "lip_equiv.png"

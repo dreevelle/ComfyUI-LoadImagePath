@@ -17,10 +17,12 @@ those for free rather than reimplementing them badly.
 
 ``Load Image Sequence From Path`` handles the case the first node deliberately
 does not: a whole folder, loaded in place with no copying, with frame selection.
-It is entirely server-side with no frontend code. Because its path is free text
-arriving over ``/prompt``, it reads only inside ComfyUI's own directories plus
-whatever the operator allows through ``COMFYUI_LOADIMAGEPATH_ROOTS`` — see
-``_containment_error``.
+It is entirely server-side with no frontend code.
+
+Both ways in take a filesystem path from an untrusted caller, so both are
+contained the same way: reads happen only inside ComfyUI's own directories plus
+whatever the operator allows through ``COMFYUI_LOADIMAGEPATH_ROOTS``. See
+``_containment_error`` — that fence is why the pack is installable at all.
 
 Both decode through ``VideoFromFile``, the same primitive ``Load Image`` uses, so
 pixels and masks match it bit for bit — full-precision 16-bit PNG, paletted
@@ -29,6 +31,7 @@ undersized 64x64 "no mask here" sentinel.
 """
 
 import hashlib
+import logging
 import mimetypes
 import os
 import shutil
@@ -60,7 +63,7 @@ BIGMAX = 2**53 - 1
 # Opt-in for running the import route on a non-loopback bind. See _import_denied.
 ALLOW_REMOTE_ENV = "COMFYUI_LOADIMAGEPATH_ALLOW_REMOTE"
 
-# Extra directories the sequence node may read from, on top of ComfyUI's own.
+# Extra directories these nodes may read from, on top of ComfyUI's own.
 # os.pathsep-separated, like PATH. See _allowed_roots.
 ALLOWED_ROOTS_ENV = "COMFYUI_LOADIMAGEPATH_ROOTS"
 
@@ -101,7 +104,10 @@ def _resolve_path(path: str | None) -> str | None:
 
 
 def _allowed_roots() -> list[str]:
-    """Directories the sequence node is permitted to read from.
+    """Directories this package is permitted to read from.
+
+    Governs both read surfaces — the sequence node's `path` and the import
+    route — because they are the same primitive and deserve the same knob.
 
     ComfyUI's own directories always, plus whatever the operator listed in
     COMFYUI_LOADIMAGEPATH_ROOTS. Recomputed per call rather than cached: the
@@ -126,12 +132,14 @@ def _allowed_roots() -> list[str]:
 def _containment_error(resolved: str) -> str | None:
     """Reason `resolved` is out of bounds, or None if it may be read.
 
-    An unbounded filesystem path on a node input is an arbitrary-read primitive:
-    anything that can reach /prompt can name a file and read the decoded pixels
-    back out of the IMAGE output. Containing reads to directories the *operator*
-    chose is what makes that a configured capability rather than an exposed one,
-    which is why the allowlist is settable only from the environment ComfyUI was
-    started in and never from the graph.
+    An unbounded filesystem path is an arbitrary-read primitive on either
+    surface: through the sequence node, anything that can reach /prompt names a
+    file and reads the decoded pixels out of the IMAGE output; through the
+    import route, it names a file, gets it copied into input/, and fetches it
+    back from /view. Containing reads to directories the *operator* chose is
+    what makes that a configured capability rather than an exposed one, which is
+    why the allowlist is settable only from the environment ComfyUI was started
+    in — never from the graph, and never from the request.
 
     Containment is checked before any stat of the path, so an out-of-bounds path
     cannot be used as an existence oracle either.
@@ -309,6 +317,10 @@ def _to_image_and_mask(parts, names, where, dtype, device):
 #   * Refused outright when the server is bound to a non-loopback address,
 #     unless ALLOW_REMOTE_ENV is set. A file-copy endpoint reachable from the
 #     network is a different proposition to one reachable from your own machine.
+#   * The source must be inside _allowed_roots(). Loopback is not a trust
+#     boundary on its own: a page in the operator's own browser is on loopback
+#     too, and CSRF to 127.0.0.1 is exactly how that gets abused. Containment is
+#     what makes "copy me that file" a capability the operator configured.
 #   * The source must be a real image: its MIME type must be image/*, anything a
 #     browser executes inline (SVG, HTML, XML) is refused, and Pillow must agree
 #     it can parse the header. Extension alone is not trusted.
@@ -401,6 +413,20 @@ async def import_handler(request: web.Request) -> web.Response:
         resolved = _resolve_path(payload.get("path"))
     except ValueError as e:
         return web.json_response({"error": str(e)}, status=400)
+
+    # Containment before any stat, so a path outside the allowlist cannot be
+    # probed for existence by telling 403 and 404 apart.
+    denied = None if resolved is None else _containment_error(resolved)
+    if denied is not None:
+        # The console gets the full reason, including which folders are allowed.
+        # The response gets one line, because web/loadimagepath.js renders it
+        # into a widget label where a paragraph would be unreadable.
+        logging.warning("[LoadImagePath] refused import: %s", denied)
+        return web.json_response(
+            {"error": f"Outside the folders this may import from — set "
+                      f"{ALLOWED_ROOTS_ENV} on the server to allow it."},
+            status=403,
+        )
 
     if resolved is None or not os.path.exists(resolved):
         return web.json_response({"error": f"path does not exist: {resolved}"}, status=404)
