@@ -23,7 +23,8 @@ doesn't: a whole folder, loaded in place with no copying, with frame selection.
 > ComfyUI's own `input/`, `output/`, `temp/` and `user/` folders. To use paths
 > from anywhere else — which is presumably why you installed this — name those
 > folders in `COMFYUI_LOADIMAGEPATH_ROOTS` when you start ComfyUI. One-time
-> setup, details in [Security](#security).
+> setup, and it takes effect at the *next* start — a server that is already up
+> never sees it. Details in [Security](#security).
 
 ## Nodes
 
@@ -87,11 +88,36 @@ ComfyUI, separated the way `PATH` is (`:` on Linux and macOS, `;` on Windows):
 COMFYUI_LOADIMAGEPATH_ROOTS=~/Pictures:~/frames:/mnt/renders python main.py
 ```
 
-Set it once in whatever starts ComfyUI and forget about it. Until you do, a path
-outside those folders is refused: the sequence node fails validation on the queue
-press with a message naming the variable, and the loader's paste box reports it
-in the widget label, with the full list of allowed folders in the server console.
-`..` and symlinks are resolved before the check, so neither escapes.
+Until you do, a path outside those folders is refused: the sequence node fails
+validation on the queue press with a message naming the variable, and the
+loader's paste box reports it in the widget label, with the full list of allowed
+folders in the server console. `..` and symlinks are resolved before the check,
+so neither escapes.
+
+### It is read once, when ComfyUI starts
+
+This is the part that trips people up, so it is worth being blunt about.
+
+The allowlist comes from the environment of the **running ComfyUI process**.
+Nothing outside that process can change it, which is deliberate — it is what
+keeps the fence out of reach of the graph and the request. Two consequences:
+
+- **Changing it means restarting ComfyUI.** Editing your shell profile, or
+  exporting the variable in a terminal, does nothing to a server that is already
+  up.
+- **A terminal that was already open does not have it.** Shell profiles are read
+  when a shell starts, so the window you have had open since this morning still
+  carries the old environment, and a ComfyUI launched from it does too. Open a
+  new terminal — or re-exec your shell — before launching.
+
+If you set it and still get refused, read the `Allowed:` list in the refusal:
+that list *is* the running server's environment. A folder you configured that is
+missing from it means the server predates your change, not that the path is
+wrong.
+
+Set it wherever your launcher gets its environment — your shell profile for
+`python main.py` or comfy-cli, the service definition under systemd, the
+shortcut or `.bat` on Windows, the desktop entry for ComfyUI Desktop.
 
 The reason for the fence: both surfaces take a filesystem path from an untrusted
 caller. The sequence node's `path` is free text arriving over `/prompt`, and its

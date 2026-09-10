@@ -152,6 +152,9 @@ def _containment_error(resolved: str) -> str | None:
     return (
         f"path is outside the folders this node may read: {resolved}\n"
         f"Allowed: {', '.join(roots)}\n"
+        f"That list is this running server's own environment. If a folder you have "
+        f"already configured is missing from it, ComfyUI was started before the "
+        f"change and has to be restarted to see it.\n"
         f"To read from anywhere else, start ComfyUI with {ALLOWED_ROOTS_ENV} set to "
         f"the folders you want to allow, separated by '{os.pathsep}' — for example "
         f"{ALLOWED_ROOTS_ENV}={os.path.join(os.path.expanduser('~'), 'frames')}"
