@@ -3,9 +3,8 @@
 Not shipped in the registry archive; see .comfyignore. Run from ComfyUI's root
 with ComfyUI on sys.path:
 
-    cd /home/dreevelle/comfy/ComfyUI && PYTHONPATH=/home/dreevelle/comfy/ComfyUI \
-    /home/dreevelle/comfy-env/bin/python \
-    /home/dreevelle/Projects/ComfyUI-LoadImagePath/gate_tests.py
+    cd /home/dreevelle/ComfyUI && PYTHONPATH=. .venv/bin/python \
+    custom_nodes/comfyui-load-image-path/gate_tests.py
 
 Fixtures are 70x50 on purpose: at 64x64 a real [B, H, W] mask would be
 indistinguishable from the [B, 64, 64] "no mask" sentinel and the equivalence

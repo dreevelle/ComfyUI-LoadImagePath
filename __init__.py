@@ -51,7 +51,7 @@ from comfy.cli_args import args
 from comfy.utils import ProgressBar
 from comfy_api.latest import ComfyExtension, IO, InputImpl, UI
 
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 # Serves web/loadimagepath.js, which adds the paste-a-path box to the loader.
 WEB_DIRECTORY = "./web"
@@ -312,6 +312,58 @@ def _to_image_and_mask(parts, names, where, dtype, device):
 
 
 # ---------------------------------------------------------------------------
+# Crop and pad (Load Image From Path only)
+#
+# Both run after the decode, on the finished tensors, so with the defaults —
+# no crop, no pads — nothing is touched and the output stays bit-identical to
+# Load Image. Neither resizes: a crop keeps source pixels, a pad adds new ones.
+# ---------------------------------------------------------------------------
+CROP_RATIOS = ["free", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9"]
+
+
+def _hex_rgb(color: str) -> tuple[float, float, float]:
+    value = (color or "").strip().lstrip("#")
+    if len(value) == 3:
+        value = "".join(c * 2 for c in value)
+    if len(value) != 6 or any(c not in "0123456789abcdefABCDEF" for c in value):
+        raise ValueError(f"fill_color must be #rgb or #rrggbb, got {color!r}")
+    return tuple(int(value[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+
+def _crop_and_pad(images, mask, has_alpha, crop, pads, fill_color):
+    """Crop to (x, y, w, h), then pad by (left, top, right, bottom).
+
+    A width or height of 0 means "to the edge". The mask follows the crop only
+    when it is a real alpha mask; the 64x64 "no mask" sentinel is left as it is,
+    since cropping it would make it a real, tiny mask. Padding always produces a
+    real mask: 1 on the pads (the area to fill), the cropped mask inside.
+    """
+    _, height, width, _ = images.shape
+    x = min(max(0, crop[0]), width - 1)
+    y = min(max(0, crop[1]), height - 1)
+    w = width - x if crop[2] <= 0 else min(crop[2], width - x)
+    h = height - y if crop[3] <= 0 else min(crop[3], height - y)
+
+    if (x, y, w, h) != (0, 0, width, height):
+        images = images[:, y:y + h, x:x + w, :]
+        if has_alpha:
+            mask = mask[:, y:y + h, x:x + w]
+
+    left, top, right, bottom = (max(0, p) for p in pads)
+    if left or top or right or bottom:
+        batch = images.shape[0]
+        fill = torch.tensor(_hex_rgb(fill_color), dtype=images.dtype, device=images.device)
+        canvas = fill.expand(batch, h + top + bottom, w + left + right, 3).clone()
+        canvas[:, top:top + h, left:left + w, :] = images
+        inner = mask if has_alpha else torch.zeros((batch, h, w), dtype=mask.dtype, device=mask.device)
+        full = torch.ones((batch, h + top + bottom, w + left + right), dtype=mask.dtype, device=mask.device)
+        full[:, top:top + h, left:left + w] = inner
+        images, mask = canvas, full
+
+    return images, mask
+
+
+# ---------------------------------------------------------------------------
 # Import into input/
 #
 # Copying a file the caller names is a wider primitive than reading one, so it
@@ -520,12 +572,39 @@ class LoadImageFromPath(IO.ComfyNode):
                         "anywhere on disk and select it here."
                     ),
                 ),
+                # Set by dragging on the preview (web/crop.js); 0 width or
+                # height means "to the edge", so the defaults crop nothing.
+                IO.Int.Input("crop_x", default=0, min=0, max=BIGMAX, advanced=True,
+                             tooltip="Left edge of the crop, in pixels. Drag on the preview to set it."),
+                IO.Int.Input("crop_y", default=0, min=0, max=BIGMAX, advanced=True,
+                             tooltip="Top edge of the crop, in pixels."),
+                IO.Int.Input("crop_width", default=0, min=0, max=BIGMAX, advanced=True,
+                             tooltip="Crop width in pixels. 0 = to the right edge."),
+                IO.Int.Input("crop_height", default=0, min=0, max=BIGMAX, advanced=True,
+                             tooltip="Crop height in pixels. 0 = to the bottom edge."),
+                IO.Combo.Input("crop_ratio", options=CROP_RATIOS, default="free",
+                               tooltip="Locks the crop you drag on the preview to this shape. "
+                                       "Drag on the picture to crop, drag inside the box to move it, "
+                                       "double-click to reset."),
+                IO.Int.Input("pad_left", default=0, min=0, max=BIGMAX,
+                             tooltip="Pixels added to the left of the (cropped) picture."),
+                IO.Int.Input("pad_top", default=0, min=0, max=BIGMAX,
+                             tooltip="Pixels added above."),
+                IO.Int.Input("pad_right", default=0, min=0, max=BIGMAX,
+                             tooltip="Pixels added to the right."),
+                IO.Int.Input("pad_bottom", default=0, min=0, max=BIGMAX,
+                             tooltip="Pixels added below."),
+                IO.String.Input("fill_color", default="#808080", advanced=True,
+                                tooltip="Colour of the pads. The mask is 1 on them, ready for outpainting."),
             ],
             outputs=[IO.Image.Output(), IO.Mask.Output()],
         )
 
     @classmethod
-    def execute(cls, image: str) -> IO.NodeOutput:
+    def execute(cls, image: str, crop_x: int = 0, crop_y: int = 0, crop_width: int = 0,
+                crop_height: int = 0, crop_ratio: str = "free", pad_left: int = 0,
+                pad_top: int = 0, pad_right: int = 0, pad_bottom: int = 0,
+                fill_color: str = "#808080") -> IO.NodeOutput:
         image_path = folder_paths.get_annotated_filepath(image)
         dtype = comfy.model_management.intermediate_dtype()
         device = comfy.model_management.intermediate_device()
@@ -533,6 +612,12 @@ class LoadImageFromPath(IO.ComfyNode):
         parts = [_load_one(image_path)]
         images, mask = _to_image_and_mask(
             parts, [os.path.basename(image_path)], image_path, dtype, device
+        )
+        # crop_ratio only shapes the drag on the preview; the numbers are what runs.
+        images, mask = _crop_and_pad(
+            images, mask, parts[0][1] is not None,
+            (crop_x, crop_y, crop_width, crop_height),
+            (pad_left, pad_top, pad_right, pad_bottom), fill_color,
         )
         return IO.NodeOutput(images, mask)
 

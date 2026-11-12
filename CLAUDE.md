@@ -4,13 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A ComfyUI custom node package. All Python lives in `__init__.py` and the one
-frontend file in `web/loadimagepath.js`; there is no build step, test suite, or
-linter config. Two nodes:
+A ComfyUI custom node package. All Python lives in `__init__.py` and the
+frontend in `web/loadimagepath.js` (the paste box) and `web/crop.js` (crop and
+pad on the preview); there is no build step or linter config. Two nodes:
 
-- **`LoadImageFromPath`** — a structural clone of core's `LoadImage` (schema is
-  literally just an `image` combo with `upload=image`), plus a frontend-only
-  paste box that imports a file into `input/` and selects it.
+- **`LoadImageFromPath`** — a structural clone of core's `LoadImage` (an
+  `image` combo with `upload=image`), plus a frontend-only paste box that
+  imports a file into `input/` and selects it, and crop and pad inputs set by
+  dragging on its preview (`web/crop.js`). With crop and pad at their defaults
+  it is still bit-identical to `LoadImage`.
 - **`LoadImageSequenceFromPath`** — folder loading in place, with frame
   selection and threaded decode. No frontend code.
 
@@ -25,33 +27,20 @@ not `IS_CHANGED` and `VALIDATE_INPUTS`.
 
 ## Local environment
 
-- ComfyUI checkout: `/home/dreevelle/comfy/ComfyUI`
-- Python venv (has `av`, `torch`, `numpy`, `Pillow`): `/home/dreevelle/comfy-env/bin/python`
-- The package is published, and `ComfyUI/custom_nodes/comfyui-load-image-path`
-  (lowercase, the registry id) is a **ComfyUI-Manager install** that tracks
-  registry releases. This working tree is not wired into ComfyUI.
+- ComfyUI checkout: `/home/dreevelle/ComfyUI`, run as the systemd user service
+  `comfyui` (`comfyui restart` after a Python change; a JS change needs only a
+  page reload).
+- Python venv (has `av`, `torch`, `numpy`, `Pillow`): `/home/dreevelle/ComfyUI/.venv/bin/python`
+- This working tree **is** the installed copy: a git clone at
+  `ComfyUI/custom_nodes/comfyui-load-image-path`, fetching over HTTPS and
+  pushing over SSH. Change it, restart, test in the UI, then push. Pushing a
+  version change publishes (see Releasing).
 
-To test a change before releasing it, symlink this tree in under its CamelCase
-name so it doesn't collide with the Manager install:
-
-```bash
-ln -sfn /home/dreevelle/Projects/ComfyUI-LoadImagePath \
-        /home/dreevelle/comfy/ComfyUI/custom_nodes/ComfyUI-LoadImagePath
-```
-
-**Remove that symlink before doing anything in ComfyUI-Manager for this
-package.** Manager's remove/replace path does `shutil.rmtree` on the *resolved*
-path, so it deletes the symlink target's contents instead of unlinking — on
-2026-08-09 that wiped a sibling package's working tree, `.git` included, and it
-had to be restored by re-cloning. Commit and push before any Manager operation,
-and never leave a symlinked dev copy in place while installing or updating the
-published version.
-
-Run ComfyUI:
-
-```bash
-/home/dreevelle/comfy-env/bin/python /home/dreevelle/comfy/ComfyUI/main.py
-```
+If the Manager ever swaps it for the registry release, it parks this clone as
+`custom_nodes/.disabled/comfyui-load-image-path@nightly`. Move it back rather
+than reinstalling. Commit and push before any Manager operation on this pack:
+on 2026-08-09 a Manager remove/replace through a symlinked dev copy deleted a
+sibling package's working tree, `.git` included.
 
 ## Verifying changes
 
@@ -65,14 +54,13 @@ to the decode or mask path must be checked against it. Copy a test image into
 ComfyUI's `input/` so the built-in node can see it, then:
 
 ```bash
-cd /home/dreevelle/comfy/ComfyUI && PYTHONPATH=/home/dreevelle/comfy/ComfyUI \
-/home/dreevelle/comfy-env/bin/python -c "
+cd /home/dreevelle/ComfyUI && PYTHONPATH=. .venv/bin/python -c "
 import importlib.util, torch, nodes, os, folder_paths
-spec = importlib.util.spec_from_file_location('lip', '/home/dreevelle/Projects/ComfyUI-LoadImagePath/__init__.py')
+spec = importlib.util.spec_from_file_location('lip', 'custom_nodes/comfyui-load-image-path/__init__.py')
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 name = 'SOME_IMAGE.png'
 ni, nm = nodes.LoadImage().load_image(image=name)
-oi, om = m.LoadImageFromPath.execute(path=os.path.join(folder_paths.get_input_directory(), name)).args
+oi, om = m.LoadImageFromPath.execute(image=name).result
 print('image identical:', torch.equal(ni, oi))
 print('mask  identical:', torch.equal(nm, om), tuple(nm.shape), tuple(om.shape))
 "
@@ -288,6 +276,37 @@ same precedent for the same reason.
 `LoadImageFromPath` deliberately does the opposite and content-hashes its single
 file, because there it matches core's `LoadImage` exactly, which is that node's
 whole reason for existing.
+
+### Crop and pad (`web/crop.js` + `_crop_and_pad`)
+
+`_crop_and_pad` runs after `_to_image_and_mask`, on the finished tensors, so
+the decode path is untouched and the defaults (no crop, no pads) return the
+tensors as they are — still bit-identical to `LoadImage`. The mask follows a
+crop only when the file had alpha (`parts[0][1] is not None`, never the mask's
+shape, which a 64x64 image would make ambiguous): cropping the `[B, 64, 64]`
+sentinel would turn "no mask" into a real, tiny mask. Pads always make a real
+mask, `1` on the pads. `crop_ratio` only shapes the drag; execution uses the
+numbers.
+
+`web/crop.js` is the one place this pack draws a preview. Core draws a loader's
+picture from its `$$canvas-image-preview` widget in a deferred pass after the
+node, so an overlay painted in `onDrawForeground` ends up underneath it. For
+this node only, that widget's `drawWidget` is wrapped to draw the picture itself
+with core's rule (fitted, centred, never upscaled, a 15px caption band when
+`Comfy.Node.AllowImageSizeDraw` is on) plus the crop and pads, and its
+`onPointerDown` is wrapped so a press on the picture edits the crop instead of
+dragging the node. `node.imgs`, the `image` combo, the mask editor and clipspace
+are all still core's. Any exception falls back to core's drawing and pointer
+handling, so the failure mode is still "a plain native loader". The widget is
+recreated on every new picture, so it is patched lazily from
+`onDrawBackground`.
+
+**Widget order is a compatibility contract.** Saved workflows restore widget
+values *by position*, and before crop and pad they were
+`[paste path, image, upload]`. Core appends the upload button after every
+schema input, so `web/loadimagepath.js` moves it back to directly after `image`;
+without that, `upload`'s value `"image"` lands in `crop_x` as `NaN`. New inputs
+must go after the existing ones, never between them.
 
 ## Conventions
 

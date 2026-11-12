@@ -34,9 +34,22 @@ doesn't: a whole folder, loaded in place with no copying, with frame selection.
 |---|---|---|
 | `paste path` | — | Paste a path and press Enter. The file is imported into `input/` and selected below. Not a graph input — it does its job and clears itself. Paths outside ComfyUI's own folders need `COMFYUI_LOADIMAGEPATH_ROOTS` — see [Security](#security). |
 | `image` | — | The built-in image combo, with its upload button. Identical to `Load Image`. |
+| `crop_ratio` | `free` | Locks the crop you drag on the preview: `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`. Choosing one snaps the current crop to the largest box of that shape inside it. |
+| `pad_left` / `pad_top` / `pad_right` / `pad_bottom` | `0` | Pixels added around the (cropped) picture. |
+| `crop_x` / `crop_y` / `crop_width` / `crop_height` *(advanced)* | `0` | The crop, set by dragging on the preview. A width or height of `0` means "to the edge". |
+| `fill_color` *(advanced)* | `#808080` | Colour of the pads. |
 
 Outputs `IMAGE` and `MASK`. Right-click → **Open in MaskEditor** works, because
 this node is a native loader in every respect that matters.
+
+**Crop and pad on the preview.** Drag on the picture to crop it, drag inside the
+box to move it, drag a handle to resize it, and double-click to reset. Pads show
+as bands in the fill colour around the crop, and the size under the preview reads
+`source → output`. Picking a different picture resets the crop. A pad is marked
+`1` in the mask — the area to fill — so the output is ready for outpainting. With
+no crop and no pads (the defaults) nothing is touched: the output is still
+bit-identical to `Load Image`. Neither one resizes: a crop keeps source pixels, a
+pad adds new ones.
 
 Imports are content-addressed: the filename gets a short hash of the file's
 contents, so pasting the same path twice reuses the one copy instead of filling

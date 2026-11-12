@@ -97,6 +97,18 @@ app.registerExtension({
         widgets.splice(to, 0, pasteWidget);
       }
 
+      // Saved workflows restore widget values by position, and before the crop
+      // and pad inputs existed they were [paste path, image, upload]. Core adds
+      // the upload button after every schema input, so without this the
+      // button's value lands in crop_x. Directly after `image` keeps old
+      // workflows lined up and the new widgets on their defaults.
+      const uploadWidget = widgets.find((w) => w.name === "upload");
+      const imageAt = widgets.indexOf(imageWidget);
+      if (uploadWidget && imageAt > -1 && widgets.indexOf(uploadWidget) !== imageAt + 1) {
+        widgets.splice(widgets.indexOf(uploadWidget), 1);
+        widgets.splice(widgets.indexOf(imageWidget) + 1, 0, uploadWidget);
+      }
+
       return result;
     };
   },
